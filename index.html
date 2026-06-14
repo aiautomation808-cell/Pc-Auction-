@@ -833,36 +833,50 @@
     
     // --- Bid Logic ---
     let currentBid = 0;
+    let currentBids = [];
     
-    function getStoredBids() {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (!stored) return [];
+    async function fetchBids() {
       try {
-        let parsed = JSON.parse(stored);
-        if (!Array.isArray(parsed)) {
-          parsed.id = parsed.id || Date.now().toString();
-          parsed = [parsed];
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
-        } else {
-          let hasChange = false;
-          parsed.forEach(p => { if(!p.id) { p.id = Date.now().toString() + Math.random().toString(); hasChange = true; } });
-          if(hasChange) localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+        const res = await fetch('/api/bids');
+        if (res.ok) {
+          currentBids = await res.json();
+          
+          let maxBid = 0;
+          if (currentBids.length > 0) {
+            maxBid = Math.max(...currentBids.map(b => b.amount));
+          }
+          
+          if (maxBid !== currentBid) {
+            currentBid = maxBid;
+            updateOdometer(currentBid);
+            updateNextBidText();
+            document.getElementById('bidAmt').min = currentBid + MINIMUM_INCREMENT;
+            
+            // If admin dashboard is open, update it
+            if (adminOverlay.style.display === 'flex' && adminDashboard.style.display === 'block') {
+              renderAdminDashboard();
+            }
+          }
         }
-        return parsed;
-      } catch(e) {
-        return [];
+      } catch (e) {
+        console.error('Error fetching bids', e);
       }
     }
 
+    function getStoredBids() {
+       return currentBids; // Proxy for the rest of the sync code
+    }
+
     function loadBid() {
-      const bids = getStoredBids();
       currentBid = 0;
-      if(bids.length > 0) {
-        currentBid = Math.max(...bids.map(b => b.amount));
+      if(currentBids.length > 0) {
+        currentBid = Math.max(...currentBids.map(b => b.amount));
       }
       updateOdometer(currentBid);
       updateNextBidText();
       document.getElementById('bidAmt').min = currentBid + MINIMUM_INCREMENT;
+      fetchBids(); // initial fetch
+      setInterval(fetchBids, 2000); // Polling every 2s
     }
 
     function updateNextBidText() {
@@ -984,29 +998,49 @@
 
       currentBid = bidAmt;
       
-      const newBid = { id: Date.now().toString(), name, age, whatsapp, amount: bidAmt, timestamp: new Date().toISOString() };
-      const bids = getStoredBids();
-      bids.push(newBid);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(bids));
-      
-      updateOdometer(currentBid);
-      updateNextBidText();
-      document.getElementById('bidAmt').min = currentBid + MINIMUM_INCREMENT;
+      const newBid = { name, age, whatsapp, amount: bidAmt };
       
       const btn = form.querySelector('.btn-submit');
       const oldText = btn.innerText;
-      btn.innerText = "BID PLACED!";
-      btn.style.background = "var(--success)";
-      btn.style.color = "#000";
-      
-      typeWriter(formMsg, "Bid Logged Successfully! Our system will contact the leading bidder via WhatsApp at close.", () => {
-        setTimeout(() => {
-          form.reset();
-          btn.innerText = oldText;
-          btn.style.background = "";
-          btn.style.color = "";
-          formMsg.innerHTML = "";
-        }, 5000);
+      btn.innerText = "PLACING BID...";
+      btn.disabled = true;
+
+      fetch('/api/bids', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newBid)
+      })
+      .then(res => {
+        if(!res.ok) throw new Error("Bid too low or server error");
+        return res.json();
+      })
+      .then(b => {
+        currentBids.push(b);
+        currentBid = bidAmt;
+        updateOdometer(currentBid);
+        updateNextBidText();
+        document.getElementById('bidAmt').min = currentBid + MINIMUM_INCREMENT;
+        
+        btn.innerText = "BID PLACED!";
+        btn.style.background = "var(--success)";
+        btn.style.color = "#000";
+        
+        typeWriter(formMsg, "Bid Logged Successfully! Our system will contact the leading bidder via WhatsApp at close.", () => {
+          setTimeout(() => {
+            form.reset();
+            btn.innerText = oldText;
+            btn.style.background = "";
+            btn.style.color = "";
+            btn.disabled = false;
+            formMsg.innerHTML = "";
+          }, 5000);
+        });
+      })
+      .catch(e => {
+        btn.innerText = oldText;
+        btn.disabled = false;
+        formMsg.innerHTML = "Error placing bid. Please ensure bid is high enough.";
+        formMsg.classList.add('form-error');
       });
     });
 
@@ -1137,23 +1171,22 @@
       });
       
       document.querySelectorAll('.btn-remove').forEach(btn => {
-        btn.addEventListener('click', (e) => {
+        btn.addEventListener('click', async (e) => {
           const id = e.target.getAttribute('data-id');
           if(confirm('Delete this bid?')) {
-            const updatedBids = getStoredBids().filter(b => b.id !== id);
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedBids));
+            await fetch(`/api/bids/${id}`, { method: 'DELETE' });
+            await fetchBids();
             renderAdminDashboard();
-            loadBid();
           }
         });
       });
     }
 
-    document.getElementById('btn-clear').addEventListener('click', () => {
+    document.getElementById('btn-clear').addEventListener('click', async () => {
       if(confirm('Are you absolutely sure you want to clear ALL bids? This cannot be undone.')) {
-        localStorage.removeItem(STORAGE_KEY);
+        await fetch('/api/bids', { method: 'DELETE' });
+        await fetchBids();
         renderAdminDashboard();
-        loadBid();
       }
     });
 
